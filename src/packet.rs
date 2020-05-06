@@ -145,6 +145,40 @@ impl Encoder for PacketCodec {
     type Error = StatusCode;
 
     fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        // write magic header
+        dst.reserve(PacketCodec::MAGIC_HEADER.len() + 4); // make space for header
+        dst.put(PacketCodec::MAGIC_HEADER.as_bytes());
+
+        // parse return status code
+        let (payload_len, status_code, payload) = match item {
+            // defined status codes from 0 to 3
+            StatusCode::Ok(payload) => (payload.len(), 0, Some(payload)),
+            StatusCode::UnknownError => (0, 1, None),
+            StatusCode::MessageTooLarge => (0, 2, None),
+            StatusCode::UnsupportedRequestType => (0, 3, None),
+            // reserved status codes from 4 to 32
+            // implementation specific status codes start at 33
+            StatusCode::EmptyBuffer => (0, 33, None),
+            StatusCode::NonEmptyBuffer => (0, 34, None),
+            StatusCode::NonAscii => (0, 35, None),
+            StatusCode::NonAlphabetic => (0, 36, None),
+            StatusCode::NonLowerCase => (0, 37, None),
+            // we'll pass back IO errors as an unknown error status code
+            StatusCode::IoError(_) => (0, 1, None),
+        };
+
+        // write payload length
+        dst.put_u16(payload_len as u16); // uses big-endian order
+
+        // write status_code
+        dst.put_u16(status_code); // uses big-endian order
+
+        // write payload if needed
+        if let Some(payload) = payload {
+            dst.reserve(payload.len()); // make space for payload
+            dst.put(payload);
+        }
+
         Ok(())
     }
 }
@@ -171,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_request() {
+    fn bad_request() {
         let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
         assert_eq!(
             codec.decode(&mut BytesMut::from(&b"STRY\x00\x00\x00\x00"[..])),
@@ -249,5 +283,105 @@ mod tests {
             codec.decode(&mut BytesMut::from(&b"STRY\x00\x00\x00\x04"[..])),
             Err(StatusCode::EmptyBuffer)
         );
+    }
+
+    #[test]
+    fn ok() {
+        let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
+        let mut buffer = BytesMut::new();
+        codec
+            .encode(StatusCode::Ok(BytesMut::from(&b"hello"[..])), &mut buffer)
+            .unwrap();
+        assert_eq!(buffer, &b"STRY\x00\x05\x00\x00hello"[..]);
+    }
+
+    #[test]
+    fn unknown_error() {
+        let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
+        let mut buffer = BytesMut::new();
+        codec
+            .encode(StatusCode::UnknownError, &mut buffer)
+            .unwrap();
+        assert_eq!(buffer, &b"STRY\x00\x00\x00\x01"[..]);
+    }
+
+    #[test]
+    fn message_to_large() {
+        let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
+        let mut buffer = BytesMut::new();
+        codec
+            .encode(StatusCode::MessageTooLarge, &mut buffer)
+            .unwrap();
+        assert_eq!(buffer, &b"STRY\x00\x00\x00\x02"[..]);
+    }
+
+    #[test]
+    fn unsupported_request() {
+        let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
+        let mut buffer = BytesMut::new();
+        codec
+            .encode(StatusCode::UnsupportedRequestType, &mut buffer)
+            .unwrap();
+        assert_eq!(buffer, &b"STRY\x00\x00\x00\x03"[..]);
+    }
+
+    #[test]
+    fn empty_buffer() {
+        let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
+        let mut buffer = BytesMut::new();
+        codec
+            .encode(StatusCode::EmptyBuffer, &mut buffer)
+            .unwrap();
+        assert_eq!(buffer, &b"STRY\x00\x00\x00\x21"[..]);
+    }
+
+    #[test]
+    fn non_empty_buffer() {
+        let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
+        let mut buffer = BytesMut::new();
+        codec
+            .encode(StatusCode::NonEmptyBuffer, &mut buffer)
+            .unwrap();
+        assert_eq!(buffer, &b"STRY\x00\x00\x00\x22"[..]);
+    }
+
+    #[test]
+    fn non_ascii() {
+        let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
+        let mut buffer = BytesMut::new();
+        codec
+            .encode(StatusCode::NonAscii, &mut buffer)
+            .unwrap();
+        assert_eq!(buffer, &b"STRY\x00\x00\x00\x23"[..]);
+    }
+
+    #[test]
+    fn non_alphabetic() {
+        let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
+        let mut buffer = BytesMut::new();
+        codec
+            .encode(StatusCode::NonAlphabetic, &mut buffer)
+            .unwrap();
+        assert_eq!(buffer, &b"STRY\x00\x00\x00\x24"[..]);
+    }
+
+    #[test]
+    fn non_lowercase() {
+        let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
+        let mut buffer = BytesMut::new();
+        codec
+            .encode(StatusCode::NonLowerCase, &mut buffer)
+            .unwrap();
+        assert_eq!(buffer, &b"STRY\x00\x00\x00\x25"[..]);
+    }
+
+    #[test]
+    fn io_error() {
+        let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
+        let mut buffer = BytesMut::new();
+        codec
+            .encode(StatusCode::IoError(std::io::ErrorKind::Other), &mut buffer)
+            .unwrap();
+        assert_eq!(buffer, &b"STRY\x00\x00\x00\x01"[..]); // unknown error
     }
 }
