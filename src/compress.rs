@@ -1,21 +1,6 @@
-use std::error::Error;
-use std::fmt;
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum CompressError {
-    EmptyBuffer = 33, // start at Implementer Defined Status Code region
-    NonAscii,
-    NonAlphabetic,
-    NonLowerCase,
-}
-
-impl fmt::Display for CompressError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "CompressError: {:?}", self)
-    }
-}
-
-impl Error for CompressError {}
+#[path = "message.rs"]
+mod message;
+use message::StatusCode;
 
 /// Writes the number of repeated letters, then letter, or original letters
 /// to slice, whichever sequence is shorter. Returns the number of letters written.
@@ -45,9 +30,9 @@ fn write_label(letter: char, count: usize, buffer: &mut [u8]) -> usize {
 ///
 /// Accepts a mutable reference to a buffer and returns a reference to a
 /// compressed subslice from the same buffer or error code.
-pub fn compress_inline(buffer: &mut [u8]) -> Result<&[u8], CompressError> {
+pub fn compress_inline(buffer: &mut [u8]) -> Result<&[u8], StatusCode> {
     if buffer.is_empty() {
-        return Err(CompressError::EmptyBuffer);
+        return Err(StatusCode::EmptyBuffer);
     }
 
     // init state
@@ -60,13 +45,13 @@ pub fn compress_inline(buffer: &mut [u8]) -> Result<&[u8], CompressError> {
 
         // input check
         if !current.is_ascii() {
-            return Err(CompressError::NonAscii);
+            return Err(StatusCode::NonAscii);
         }
         if !current.is_ascii_alphabetic() {
-            return Err(CompressError::NonAlphabetic);
+            return Err(StatusCode::NonAlphabetic);
         }
         if !current.is_ascii_lowercase() {
-            return Err(CompressError::NonLowerCase);
+            return Err(StatusCode::NonLowerCase);
         }
 
         if current == working {
@@ -144,10 +129,7 @@ mod tests {
     fn _123() {
         let mut input = String::from("123");
         let mut buffer = unsafe { input.as_bytes_mut() };
-        assert_eq!(
-            compress_inline(&mut buffer),
-            Err(CompressError::NonAlphabetic)
-        );
+        assert_eq!(compress_inline(&mut buffer), Err(StatusCode::NonAlphabetic));
     }
 
     #[test]
@@ -155,10 +137,7 @@ mod tests {
     fn abCD() {
         let mut input = String::from("abCD");
         let mut buffer = unsafe { input.as_bytes_mut() };
-        assert_eq!(
-            compress_inline(&mut buffer),
-            Err(CompressError::NonLowerCase)
-        );
+        assert_eq!(compress_inline(&mut buffer), Err(StatusCode::NonLowerCase));
     }
 
     #[test]
@@ -166,14 +145,14 @@ mod tests {
     fn u263A() {
         let mut input = String::from("☺");
         let mut buffer = unsafe { input.as_bytes_mut() };
-        assert_eq!(compress_inline(&mut buffer), Err(CompressError::NonAscii));
+        assert_eq!(compress_inline(&mut buffer), Err(StatusCode::NonAscii));
     }
 
     #[test]
     fn empty() {
         assert_eq!(
             compress_inline(&mut [] as &mut [u8]),
-            Err(CompressError::EmptyBuffer)
+            Err(StatusCode::EmptyBuffer)
         );
     }
 }
