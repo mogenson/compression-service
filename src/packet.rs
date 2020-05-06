@@ -1,11 +1,11 @@
-#[path = "message.rs"]
-mod message;
-use message::{RequestCode, StatusCode};
+use super::message::{RequestCode, StatusCode};
 
 use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
 pub struct PacketCodec {
+    received: usize,
+    sent: usize,
     max_payload_len: usize,
     state: DecodeState,
 }
@@ -26,9 +26,20 @@ impl PacketCodec {
         );
 
         PacketCodec {
+            sent: 0,
+            received: 0,
             max_payload_len: max_payload,
             state: DecodeState::MagicHeader,
         }
+    }
+
+    pub fn get_stats(&self) -> (usize, usize) {
+        (self.received, self.sent)
+    }
+
+    pub fn reset_stats(&mut self) {
+        self.sent = 0;
+        self.received = 0;
     }
 }
 
@@ -63,12 +74,15 @@ impl Decoder for PacketCodec {
                 // either advance src to payload length section
                 // or advance by 1 byte and look for magic header again
                 src.advance(index);
+                self.received += index;
                 self.decode(src) // recursively keep parsing
             }
             DecodeState::PayloadLen => {
                 if src.len() < 2 {
                     return Ok(None);
                 }
+
+                self.received += 2;
 
                 let length = src.get_u16() as usize; // uses big-endian order
                 if length > self.max_payload_len {
@@ -83,6 +97,8 @@ impl Decoder for PacketCodec {
                 if src.len() < 2 {
                     return Ok(None); // keep reading
                 }
+
+                self.received += 2;
 
                 self.state = DecodeState::MagicHeader; // reset in case pasrsing is done
                 match src.get_u16() {
@@ -128,6 +144,8 @@ impl Decoder for PacketCodec {
                     return Ok(None); // keep reading
                 }
 
+                self.received += length;
+
                 // Idea: if it's ok to mix decoding and compressing state, we could
                 // compress payload chunks as they arrive for faster performance
                 let payload = src.split_to(length);
@@ -142,7 +160,7 @@ impl Decoder for PacketCodec {
 
 impl Encoder for PacketCodec {
     type Item = StatusCode;
-    type Error = StatusCode;
+    type Error = std::io::Error;
 
     fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
         // write magic header
@@ -179,6 +197,8 @@ impl Encoder for PacketCodec {
             dst.put(payload);
         }
 
+        self.sent += dst.len(); // update stats
+
         Ok(())
     }
 }
@@ -208,7 +228,7 @@ mod tests {
     fn bad_request() {
         let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
         assert_eq!(
-            codec.decode(&mut BytesMut::from(&b"STRY\x00\x00\x00\x00"[..])),
+            codec.decode(&mut BytesMut::from(&b"STRY\0\0\0\0"[..])),
             Err(StatusCode::UnsupportedRequestType)
         );
     }
@@ -217,7 +237,7 @@ mod tests {
     fn good_ping() {
         let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
         assert_eq!(
-            codec.decode(&mut BytesMut::from(&b"STRY\x00\x00\x00\x01"[..])),
+            codec.decode(&mut BytesMut::from(&b"STRY\0\0\0\x01"[..])),
             Ok(Some(RequestCode::Ping))
         );
     }
@@ -226,7 +246,7 @@ mod tests {
     fn bad_ping() {
         let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
         assert_eq!(
-            codec.decode(&mut BytesMut::from(&b"STRY\x00\x01\x00\x01"[..])),
+            codec.decode(&mut BytesMut::from(&b"STRY\0\x01\0\x01"[..])),
             Err(StatusCode::NonEmptyBuffer)
         );
     }
@@ -235,7 +255,7 @@ mod tests {
     fn good_get_stats() {
         let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
         assert_eq!(
-            codec.decode(&mut BytesMut::from(&b"STRY\x00\x00\x00\x02"[..])),
+            codec.decode(&mut BytesMut::from(&b"STRY\0\0\0\x02"[..])),
             Ok(Some(RequestCode::GetStats))
         );
     }
@@ -244,7 +264,7 @@ mod tests {
     fn bad_get_stats() {
         let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
         assert_eq!(
-            codec.decode(&mut BytesMut::from(&b"STRY\x00\x01\x00\x02"[..])),
+            codec.decode(&mut BytesMut::from(&b"STRY\0\x01\0\x02"[..])),
             Err(StatusCode::NonEmptyBuffer)
         );
     }
@@ -253,7 +273,7 @@ mod tests {
     fn good_reset_stats() {
         let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
         assert_eq!(
-            codec.decode(&mut BytesMut::from(&b"STRY\x00\x00\x00\x03"[..])),
+            codec.decode(&mut BytesMut::from(&b"STRY\0\0\0\x03"[..])),
             Ok(Some(RequestCode::ResetStats))
         );
     }
@@ -262,7 +282,7 @@ mod tests {
     fn bad_reset_stats() {
         let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
         assert_eq!(
-            codec.decode(&mut BytesMut::from(&b"STRY\x00\x01\x00\x03"[..])),
+            codec.decode(&mut BytesMut::from(&b"STRY\0\x01\0\x03"[..])),
             Err(StatusCode::NonEmptyBuffer)
         );
     }
@@ -271,7 +291,7 @@ mod tests {
     fn good_compress() {
         let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
         assert_eq!(
-            codec.decode(&mut BytesMut::from(&b"STRY\x00\x05\x00\x04hello"[..])),
+            codec.decode(&mut BytesMut::from(&b"STRY\0\x05\0\x04hello"[..])),
             Ok(Some(RequestCode::Compress(BytesMut::from(&b"hello"[..]))))
         );
     }
@@ -280,29 +300,37 @@ mod tests {
     fn bad_compress() {
         let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
         assert_eq!(
-            codec.decode(&mut BytesMut::from(&b"STRY\x00\x00\x00\x04"[..])),
+            codec.decode(&mut BytesMut::from(&b"STRY\0\0\0\x04"[..])),
             Err(StatusCode::EmptyBuffer)
         );
     }
 
     #[test]
-    fn ok() {
+    fn ok_with_payload() {
         let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
         let mut buffer = BytesMut::new();
         codec
             .encode(StatusCode::Ok(BytesMut::from(&b"hello"[..])), &mut buffer)
             .unwrap();
-        assert_eq!(buffer, &b"STRY\x00\x05\x00\x00hello"[..]);
+        assert_eq!(buffer, &b"STRY\0\x05\0\0hello"[..]);
+    }
+
+    #[test]
+    fn ok_without_payload() {
+        let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
+        let mut buffer = BytesMut::new();
+        codec
+            .encode(StatusCode::Ok(BytesMut::new()), &mut buffer)
+            .unwrap();
+        assert_eq!(buffer, &b"STRY\0\0\0\0"[..]);
     }
 
     #[test]
     fn unknown_error() {
         let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
         let mut buffer = BytesMut::new();
-        codec
-            .encode(StatusCode::UnknownError, &mut buffer)
-            .unwrap();
-        assert_eq!(buffer, &b"STRY\x00\x00\x00\x01"[..]);
+        codec.encode(StatusCode::UnknownError, &mut buffer).unwrap();
+        assert_eq!(buffer, &b"STRY\0\0\0\x01"[..]);
     }
 
     #[test]
@@ -312,7 +340,7 @@ mod tests {
         codec
             .encode(StatusCode::MessageTooLarge, &mut buffer)
             .unwrap();
-        assert_eq!(buffer, &b"STRY\x00\x00\x00\x02"[..]);
+        assert_eq!(buffer, &b"STRY\0\0\0\x02"[..]);
     }
 
     #[test]
@@ -322,17 +350,15 @@ mod tests {
         codec
             .encode(StatusCode::UnsupportedRequestType, &mut buffer)
             .unwrap();
-        assert_eq!(buffer, &b"STRY\x00\x00\x00\x03"[..]);
+        assert_eq!(buffer, &b"STRY\0\0\0\x03"[..]);
     }
 
     #[test]
     fn empty_buffer() {
         let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
         let mut buffer = BytesMut::new();
-        codec
-            .encode(StatusCode::EmptyBuffer, &mut buffer)
-            .unwrap();
-        assert_eq!(buffer, &b"STRY\x00\x00\x00\x21"[..]);
+        codec.encode(StatusCode::EmptyBuffer, &mut buffer).unwrap();
+        assert_eq!(buffer, &b"STRY\0\0\0\x21"[..]);
     }
 
     #[test]
@@ -342,17 +368,15 @@ mod tests {
         codec
             .encode(StatusCode::NonEmptyBuffer, &mut buffer)
             .unwrap();
-        assert_eq!(buffer, &b"STRY\x00\x00\x00\x22"[..]);
+        assert_eq!(buffer, &b"STRY\0\0\0\x22"[..]);
     }
 
     #[test]
     fn non_ascii() {
         let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
         let mut buffer = BytesMut::new();
-        codec
-            .encode(StatusCode::NonAscii, &mut buffer)
-            .unwrap();
-        assert_eq!(buffer, &b"STRY\x00\x00\x00\x23"[..]);
+        codec.encode(StatusCode::NonAscii, &mut buffer).unwrap();
+        assert_eq!(buffer, &b"STRY\0\0\0\x23"[..]);
     }
 
     #[test]
@@ -362,17 +386,15 @@ mod tests {
         codec
             .encode(StatusCode::NonAlphabetic, &mut buffer)
             .unwrap();
-        assert_eq!(buffer, &b"STRY\x00\x00\x00\x24"[..]);
+        assert_eq!(buffer, &b"STRY\0\0\0\x24"[..]);
     }
 
     #[test]
     fn non_lowercase() {
         let mut codec = PacketCodec::new_with_max_payload(16 * 1024);
         let mut buffer = BytesMut::new();
-        codec
-            .encode(StatusCode::NonLowerCase, &mut buffer)
-            .unwrap();
-        assert_eq!(buffer, &b"STRY\x00\x00\x00\x25"[..]);
+        codec.encode(StatusCode::NonLowerCase, &mut buffer).unwrap();
+        assert_eq!(buffer, &b"STRY\0\0\0\x25"[..]);
     }
 
     #[test]
@@ -382,6 +404,6 @@ mod tests {
         codec
             .encode(StatusCode::IoError(std::io::ErrorKind::Other), &mut buffer)
             .unwrap();
-        assert_eq!(buffer, &b"STRY\x00\x00\x00\x01"[..]); // unknown error
+        assert_eq!(buffer, &b"STRY\0\0\0\x01"[..]); // unknown error
     }
 }

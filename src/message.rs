@@ -12,7 +12,8 @@ pub enum RequestCode {
 #[derive(Debug, PartialEq)]
 pub enum StatusCode {
     Ok(BytesMut), // BytesMut may be empty
-    UnknownError,
+    #[allow(dead_code)]
+    UnknownError, // UnknownError is never used
     MessageTooLarge,
     UnsupportedRequestType,
     EmptyBuffer, // these implementation specific status codes start at 33
